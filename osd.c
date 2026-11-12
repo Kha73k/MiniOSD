@@ -20,9 +20,13 @@ static wchar_t target[64]; // exe whose FPS we show; "" = entire screen (whateve
 static HWND overlay, trayWnd;
 static UINT WM_TASKBARCREATED;
 #define WM_TRAY (WM_APP + 1)
+#define ID_POS_RIGHT 95
+#define ID_POS_LEFT  96
 #define ID_HIDE 97
 #define ID_PICK 98
 #define ID_EXIT 99
+
+static int pos; // 0 = top right, 1 = top left
 
 // Diagnostics: start with /log to write osd.log next to the exe.
 static HANDLE logFile;
@@ -341,12 +345,14 @@ static void render(const RECT *anchor)
     static Run prev[16];
     static int prevN;
     static RECT prevAnchor;
+    static int prevPos = -1;
     if (!nRuns) { ShowWindow(overlay, SW_HIDE); return; }
     // Same text in the same place: nothing to redraw.
-    if (nRuns == prevN && EqualRect(anchor, &prevAnchor) && !memcmp(runs, prev, nRuns * sizeof(Run)) &&
+    if (nRuns == prevN && pos == prevPos && EqualRect(anchor, &prevAnchor) && !memcmp(runs, prev, nRuns * sizeof(Run)) &&
         IsWindowVisible(overlay)) return;
     prevN = nRuns;
     prevAnchor = *anchor;
+    prevPos = pos;
     CopyMemory(prev, runs, nRuns * sizeof(Run));
     if (!dc) dc = CreateCompatibleDC(NULL);
 
@@ -411,7 +417,9 @@ static void render(const RECT *anchor)
             px[y * bw + xx] = (DWORD)A << 24 | a << 16 | a << 8 | a;
         }
 
-    POINT dst = { anchor->right - w - em / 2, anchor->top + em / 2 }, src = { 0, 0 };
+    POINT dst = { (pos == 1) ? (anchor->left + em / 2) : (anchor->right - w - em / 2),
+                  anchor->top + em / 2 };
+    POINT src = { 0, 0 };
     SIZE size = { w, h };
     BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
     UpdateLayeredWindow(overlay, NULL, &dst, &size, dc, &src, 0, &bf, ULW_ALPHA);
@@ -689,8 +697,13 @@ static void trayMenu(void)
     POINT pt;
     wchar_t cap[96];
     HMENU m = CreatePopupMenu();
+    HMENU posMenu = CreatePopupMenu();
+    AppendMenuW(posMenu, MF_STRING | (pos == 0 ? MF_CHECKED : 0), ID_POS_RIGHT, L"Top right");
+    AppendMenuW(posMenu, MF_STRING | (pos == 1 ? MF_CHECKED : 0), ID_POS_LEFT, L"Top left");
+
     wsprintfW(cap, L"Capture: %s...", target[0] ? target : L"Entire screen");
     AppendMenuW(m, MF_STRING | (hidden ? MF_CHECKED : 0), ID_HIDE, L"Hide overlay");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)posMenu, L"Position");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING, ID_PICK, cap);
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
@@ -705,6 +718,18 @@ static void trayMenu(void)
     if (cmd == ID_EXIT) { DestroyWindow(trayWnd); return; }
     if (cmd == ID_PICK) { openPicker(); return; }
     if (cmd == ID_HIDE) { hidden = !hidden; slowTick = 0; sample(); return; }
+    if (cmd == ID_POS_RIGHT) {
+        pos = 0;
+        WritePrivateProfileStringW(L"osd", L"pos", L"0", iniPath);
+        sample();
+        return;
+    }
+    if (cmd == ID_POS_LEFT) {
+        pos = 1;
+        WritePrivateProfileStringW(L"osd", L"pos", L"1", iniPath);
+        sample();
+        return;
+    }
     if (cmd >= 1 && cmd <= S_N) {
         int i = cmd - 1;
         on[i] = !on[i];
@@ -748,6 +773,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     GetModuleFileNameW(NULL, iniPath, MAX_PATH);
     lstrcpyW(wcsrchr(iniPath, L'.'), L".ini");
     for (int i = 0; i < S_N; i++) on[i] = GetPrivateProfileIntW(L"osd", KEYS[i], 1, iniPath);
+    pos = GetPrivateProfileIntW(L"osd", L"pos", 0, iniPath);
+    if (pos < 0 || pos > 1) pos = 0;
     GetPrivateProfileStringW(L"osd", L"target", L"", target, 64, iniPath);
     if (wcsstr(cmd, L"/log")) {
         wchar_t lp[MAX_PATH];

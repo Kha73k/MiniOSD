@@ -5,6 +5,7 @@
 *.res
 *.o
 *.obj
+*_old.exe
 
 # OS generated files
 Thumbs.db

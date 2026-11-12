@@ -15,15 +15,18 @@ Mini OSD provides a sleek, NVIDIA-style one-line HUD showing FPS, GPU usage, GPU
   - CPU temperature readout via `PawnIO` driver and `IntelMSR.bin` (using the same MSR IOCTL methods as LibreHardwareMonitor).
 - **Discord-Style Window Picker**: Click "Capture..." from the tray menu to open an interactive picker featuring live DWM thumbnails for open windows or select "Entire screen" to follow whatever app is in the foreground.
 - **Clean NVIDIA-Style Overlay**: Rendered with per-pixel alpha and soft dark outline using the Windows native **Bahnschrift** font (DIN typography).
+- **Customizable Overlay Position**: Toggle between **Top right** (default) and **Top left** overlay placement on the fly via the tray menu, with position preferences automatically saved.
 - **EcoQoS Efficiency**: Configured for Windows efficiency scheduling (EcoQoS) to ensure it never interferes with game performance.
-- **System Tray Controls**: Right-click or left-click the tray icon to toggle individual metrics on or off, pick a target window, hide the overlay, or exit.
+- **System Tray Controls**: Right-click or left-click the tray icon to toggle individual metrics on or off, pick a target window, change position, hide the overlay, or exit.
 
 ---
 
 ## 🚀 Installation & Usage
 
 ### Option 1: Installer (Recommended)
-Download and run **`MiniOSD-Setup.exe`** to install Mini OSD with Start Menu shortcuts and uninstaller support.
+Download and run **`MiniOSD-Setup.exe`**.
+- Supports clean installations with Start Menu & Desktop shortcuts.
+- **Automatic In-Place Updates**: If Mini OSD is already installed, running the setup executable will detect it, safely close the running instance, update application binaries, preserve existing user configuration (`osd.ini`), and restart the updated overlay.
 
 ### Option 2: Standalone Portable
 1. Download or clone this repository.
@@ -31,8 +34,9 @@ Download and run **`MiniOSD-Setup.exe`** to install Mini OSD with Start Menu sho
 3. Mini OSD requests Administrator privileges upon startup (required for ETW tracing and CPU temperature reading).
 
 ### Controls & Options
-- The overlay appears at the top-right of your screen or active window.
+- The overlay appears at the top of your screen or active window.
 - Right-click or left-click the **System Tray icon** to:
+  - **Position**: Switch between **Top right** and **Top left**.
   - **Capture**: Pick a specific window with live DWM thumbnails or track the active foreground app.
   - **Toggle Metrics**: Enable or disable FPS, GPU usage, GPU temp, CPU usage, or CPU temp.
   - **Hide overlay**: Temporarily hide the HUD.
