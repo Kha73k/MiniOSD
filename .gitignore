@@ -1,0 +1,12 @@
+# Runtime logs
+*.log
+
+# Intermediate object and resource files
+*.res
+*.o
+*.obj
+
+# OS generated files
+Thumbs.db
+desktop.ini
+.DS_Store
