@@ -20,15 +20,23 @@ Mini OSD provides a sleek, NVIDIA-style one-line HUD showing FPS, GPU usage, GPU
 
 ---
 
-## 🚀 Usage
+## 🚀 Installation & Usage
 
+### Option 1: Installer (Recommended)
+Download and run **`MiniOSD-Setup.exe`** to install Mini OSD with Start Menu shortcuts and uninstaller support.
+
+### Option 2: Standalone Portable
 1. Download or clone this repository.
-2. Run **`osd.exe`** (requires Administrator privileges for ETW tracing and CPU temperature reading).
-3. The overlay will appear at the top-right of your screen or active game window.
-4. Manage settings via the **System Tray**:
-   - **Capture**: Select an active game window or track the foreground window.
-   - **Toggle Metrics**: Turn FPS, GPU usage, GPU temp, CPU usage, and CPU temp on or off.
-   - **Hide overlay**: Temporarily hide the overlay without exiting.
+2. Run **`osd.exe`** directly from the folder (ensure `IntelMSR.bin` remains in the same directory).
+3. Mini OSD requests Administrator privileges upon startup (required for ETW tracing and CPU temperature reading).
+
+### Controls & Options
+- The overlay appears at the top-right of your screen or active window.
+- Right-click or left-click the **System Tray icon** to:
+  - **Capture**: Pick a specific window with live DWM thumbnails or track the active foreground app.
+  - **Toggle Metrics**: Enable or disable FPS, GPU usage, GPU temp, CPU usage, or CPU temp.
+  - **Hide overlay**: Temporarily hide the HUD.
+  - **Exit**: Close the overlay.
 
 ### Diagnostic Logging
 Start `osd.exe` with the `/log` command-line switch to generate an `osd.log` file in the application directory:
@@ -42,9 +50,10 @@ osd.exe /log
 
 ### Prerequisites
 - [MinGW-w64](https://www.mingw-w64.org/) / GCC or Clang (with `windres` support).
+- [Inno Setup 6](https://jrsoftware.org/isdl.php) (optional, if compiling the installer).
 - Windows 10/11 SDK headers and libraries (`advapi32`, `shell32`, `dwmapi`).
 
-### Build Instructions
+### Build Application Executable
 Run the included build script:
 ```cmd
 build.bat
@@ -55,14 +64,22 @@ windres osd.rc -O coff -o osd.res
 gcc -Os -s -Wall -mwindows -municode osd.c osd.res -ladvapi32 -lshell32 -ldwmapi -o osd.exe
 ```
 
+### Build Setup Installer
+To compile the `MiniOSD-Setup.exe` installer:
+```cmd
+installer\build.bat
+```
+
 ---
 
 ## 📁 Repository Structure
 
+- `MiniOSD-Setup.exe` - Windows setup installer.
+- `osd.exe` - Standalone precompiled executable.
+- `IntelMSR.bin` - Module used for MSR CPU temperature queries.
 - `osd.c` - Core application source code (ETW tracing, NVML, PawnIO, DWM picker, HUD rendering).
 - `osd.manifest` - Windows application manifest requiring administrative execution level and DPI awareness.
 - `osd.rc` - Resource definition embedding the manifest.
-- `IntelMSR.bin` - Module used for MSR CPU temperature queries.
-- `build.bat` - Compilation script.
+- `build.bat` - Application compilation script.
 - `osd.ini` - Persistent configuration file.
-- `osd.exe` - Precompiled executable ready to run.
+- `installer/` - Inno Setup packaging script (`miniosd.iss`) and build script (`build.bat`).
