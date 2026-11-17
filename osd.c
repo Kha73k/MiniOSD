@@ -1,4 +1,4 @@
-// Mini OSD: FPS / GPU / CPU overlay. One timer tick per second, no injection.
+﻿// Mini OSD: FPS / GPU / CPU overlay. One timer tick per second, no injection.
 #define _WIN32_WINNT 0x0A00
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
@@ -10,6 +10,7 @@
 #include <dwmapi.h>
 #include <evntrace.h>
 #include <evntcons.h>
+#include <intrin.h>
 
 enum { S_FPS, S_GPU, S_GPUT, S_CPU, S_CPUT, S_N };
 static const wchar_t *KEYS[S_N] = { L"fps", L"gpu", L"gputemp", L"cpu", L"cputemp" };
@@ -188,7 +189,11 @@ static void etwStart(void)
     etwOk = TRUE;
 }
 
-// ---------- GPU: NVML (ships with the NVIDIA driver) ----------
+
+// ---------- GPU ----------
+// NVIDIA: NVML (ships with the driver), most accurate.
+// Everyone else (AMD, Intel, or NVIDIA without NVML): the same sources Task Manager uses -
+//   usage from the "GPU Engine" performance counters, temperature from D3DKMT adapter perf data (WDDM 2.5+).
 typedef struct { unsigned gpu, memory; } nvmlUtil;
 static int (*nvmlInit)(void), (*nvmlShutdown)(void);
 static int (*nvmlGetHandle)(unsigned, void **);
@@ -209,49 +214,206 @@ static void nvmlStart(void)
     if (nvmlGetHandle(0, &gpu) != 0) gpu = NULL;
 }
 
-// ---------- CPU temp: PawnIO driver + IntelMSR module (same IOCTLs LibreHardwareMonitor uses) ----------
+// D3DKMT (gdi32.dll); declared here because mingw ships no d3dkmthk.h.
+typedef struct { UINT hAdapter; LUID luid; ULONG sources; BOOL precise; } KmtAdapterInfo;
+typedef struct { ULONG n; KmtAdapterInfo *a; } KmtEnum2;
+typedef struct { UINT hAdapter; int type; void *data; UINT size; } KmtQuery;
+typedef struct {
+    UINT32 physIndex;
+    ULONGLONG memFreq, maxMemFreq, maxMemFreqOC, memBandwidth, pcieBandwidth;
+    ULONG fanRpm, power, temperature; // temperature in tenths of a degree C
+    UCHAR powerStateOverride;
+} KmtPerfData;
+#define KMTQAITYPE_ADAPTERPERFDATA 62
+static LONG (APIENTRY *kmtEnum2)(KmtEnum2 *);
+static LONG (APIENTRY *kmtQuery)(KmtQuery *);
+static KmtAdapterInfo kmtAdapters[8];
+static ULONG nKmt;
+
+// PDH "GPU Engine" counters, loaded on demand so NVIDIA systems never pay for them.
+typedef LONG (WINAPI *PdhOpenQueryW_t)(LPCWSTR, DWORD_PTR, HANDLE *);
+typedef LONG (WINAPI *PdhAddEnglishCounterW_t)(HANDLE, LPCWSTR, DWORD_PTR, HANDLE *);
+typedef LONG (WINAPI *PdhCollectQueryData_t)(HANDLE);
+typedef struct { DWORD status; DWORD pad; double v; } PdhValue; // PDH_FMT_COUNTERVALUE (double)
+typedef struct { LPWSTR name; PdhValue value; } PdhItem;          // PDH_FMT_COUNTERVALUE_ITEM_W
+typedef LONG (WINAPI *PdhGetArray_t)(HANDLE, DWORD, DWORD *, DWORD *, PdhItem *);
+static PdhCollectQueryData_t pdhCollect;
+static PdhGetArray_t pdhArray;
+static HANDLE pdhQuery, pdhGpu;
+static BOOL gpuGeneric; // usage/temp via PDH + D3DKMT
+
+static void gpuStart(void)
+{
+    if (!wcsstr(GetCommandLineW(), L"/nonvml")) nvmlStart(); // /nonvml: test the vendor-neutral path
+    if (gpu) return;
+
+    HMODULE g = GetModuleHandleW(L"gdi32.dll");
+    kmtEnum2 = (void *)GetProcAddress(g, "D3DKMTEnumAdapters2");
+    kmtQuery = (void *)GetProcAddress(g, "D3DKMTQueryAdapterInfo");
+    if (kmtEnum2 && kmtQuery) {
+        KmtEnum2 e = { 8, kmtAdapters };
+        if (kmtEnum2(&e) == 0) nKmt = e.n;
+    }
+
+    HMODULE p = LoadLibraryW(L"pdh.dll");
+    if (p) {
+        PdhOpenQueryW_t open = (void *)GetProcAddress(p, "PdhOpenQueryW");
+        PdhAddEnglishCounterW_t add = (void *)GetProcAddress(p, "PdhAddEnglishCounterW");
+        pdhCollect = (void *)GetProcAddress(p, "PdhCollectQueryData");
+        pdhArray = (void *)GetProcAddress(p, "PdhGetFormattedCounterArrayW");
+        if (open && add && pdhCollect && pdhArray && open(NULL, 0, &pdhQuery) == 0 &&
+            add(pdhQuery, L"\\GPU Engine(*)\\Utilization Percentage", 0, &pdhGpu) == 0) {
+            pdhCollect(pdhQuery); // rate counter: prime it
+            gpuGeneric = TRUE;
+        }
+    }
+    gpuGeneric |= nKmt > 0;
+    logf(L"gpu: nvml=0 kmtAdapters=%u pdh=%d\r\n", nKmt, pdhGpu != NULL);
+}
+
+// Busiest engine type on the busiest adapter, like Task Manager's GPU column.
+// Instance: pid_1234_luid_0x00000000_0x0000D1A2_phys_0_eng_3_engtype_3D
+static int gpuUsageGeneric(void)
+{
+    static BYTE buf[256 * 1024];
+    struct { wchar_t key[64]; double sum; } acc[64];
+    int nAcc = 0;
+    double best = -1;
+    DWORD size = sizeof buf, count = 0;
+    if (!pdhGpu || pdhCollect(pdhQuery) != 0) return -1;
+    if (pdhArray(pdhGpu, 0x00000200 /* PDH_FMT_DOUBLE */, &size, &count, (PdhItem *)buf) != 0) return -1;
+    PdhItem *it = (PdhItem *)buf;
+    for (DWORD i = 0; i < count; i++) {
+        const wchar_t *luid = wcsstr(it[i].name, L"luid_"), *eng = wcsstr(it[i].name, L"_eng_"),
+                      *type = wcsstr(it[i].name, L"engtype_");
+        if (!luid || !eng || !type || it[i].value.status > 1) continue; // PDH_CSTATUS_VALID_DATA / NEW_DATA
+        wchar_t key[64];
+        int n = (int)(eng - luid);
+        if (n > 40) n = 40;
+        lstrcpynW(key, luid, n + 1);
+        lstrcpynW(key + n, type + 8, 64 - n);
+        int k = 0;
+        while (k < nAcc && lstrcmpW(acc[k].key, key)) k++;
+        if (k == nAcc) {
+            if (nAcc == 64) continue;
+            lstrcpyW(acc[nAcc].key, key);
+            acc[nAcc++].sum = 0;
+        }
+        acc[k].sum += it[i].value.v;
+    }
+    for (int k = 0; k < nAcc; k++) if (acc[k].sum > best) best = acc[k].sum;
+    if (best < 0) return nAcc || count ? 0 : -1;
+    return best > 100 ? 100 : (int)(best + 0.5);
+}
+
+// Hottest adapter (a dGPU beside an iGPU is the one that matters, and iGPUs often report 0).
+static int gpuTempGeneric(void)
+{
+    int best = -1;
+    for (ULONG i = 0; i < nKmt; i++) {
+        KmtPerfData d = { 0 };
+        KmtQuery q = { kmtAdapters[i].hAdapter, KMTQAITYPE_ADAPTERPERFDATA, &d, sizeof d };
+        if (kmtQuery(&q) == 0 && d.temperature > 0 && d.temperature < 1500 && (int)(d.temperature + 5) / 10 > best)
+            best = (int)(d.temperature + 5) / 10;
+    }
+    return best;
+}
+
+static int gpuUsage(void)
+{
+    nvmlUtil u;
+    if (gpu) return nvmlGetUtil(gpu, &u) == 0 ? (int)u.gpu : -1;
+    return gpuGeneric ? gpuUsageGeneric() : -1;
+}
+
+static int gpuTemp(void)
+{
+    unsigned t;
+    if (gpu) return nvmlGetTemp(gpu, 0, &t) == 0 ? (int)t : -1;
+    return nKmt ? gpuTempGeneric() : -1;
+}
+
+// ---------- CPU temp: PawnIO driver + a vendor module (same modules LibreHardwareMonitor uses) ----------
+//   Intel:            IntelMSR.bin    -> package (or core) thermal status MSR relative to TjMax
+//   AMD Zen (17h-1Ah): AMDFamily17.bin -> SMN THM_TCON_CUR_TMP (Tctl)
+// Without the PawnIO driver installed, CPU temp shows "--" and everything else still works.
 #define PIO_LOAD 0xA1B22084
 #define PIO_EXEC 0xA1B22104
 static HANDLE pawn = INVALID_HANDLE_VALUE;
+static enum { CPU_NONE, CPU_INTEL, CPU_AMD } cpuKind;
 static int tjMax;
+static HANDLE pciMutex; // shared with other hardware monitors that touch PCI config space
 
-static BOOL readMsr(ULONG64 idx, ULONG64 *v)
+static BOOL pawnCall(const char *fn, ULONG64 arg, ULONG64 *v)
 {
-    struct { char fn[32]; ULONG64 idx; } in = { "ioctl_read_msr", idx };
+    struct { char fn[32]; ULONG64 arg; } in = { { 0 }, arg };
     DWORD got = 0;
+    lstrcpynA(in.fn, fn, sizeof in.fn);
     return DeviceIoControl(pawn, PIO_EXEC, &in, sizeof in, v, sizeof *v, &got, NULL) && got == sizeof *v;
+}
+
+static BOOL loadModule(const wchar_t *name)
+{
+    wchar_t path[MAX_PATH];
+    BOOL ok = FALSE;
+    GetModuleFileNameW(NULL, path, MAX_PATH); // modules sit next to the exe
+    lstrcpyW(wcsrchr(path, L'\\') + 1, name);
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return FALSE;
+    DWORD size = GetFileSize(f, NULL), got;
+    UCHAR *blob = HeapAlloc(GetProcessHeap(), 0, size);
+    if (blob && ReadFile(f, blob, size, &got, NULL) && got == size)
+        ok = DeviceIoControl(pawn, PIO_LOAD, blob, size, NULL, 0, &got, NULL);
+    HeapFree(GetProcessHeap(), 0, blob);
+    CloseHandle(f);
+    return ok;
 }
 
 static void pawnStart(void)
 {
-    wchar_t path[MAX_PATH];
+    int r[4];
+    char vendor[13] = { 0 };
+    __cpuid(r, 0);
+    memcpy(vendor, &r[1], 4); memcpy(vendor + 4, &r[3], 4); memcpy(vendor + 8, &r[2], 4);
+    __cpuid(r, 1);
+    int family = ((r[0] >> 8) & 0xF) + (((r[0] >> 8) & 0xF) == 0xF ? (r[0] >> 20) & 0xFF : 0);
+
     pawn = CreateFileW(L"\\\\?\\GLOBALROOT\\Device\\PawnIO", FILE_READ_DATA | FILE_WRITE_DATA,
                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    logf(L"cpu: vendor=%S family=%x pawnio=%d\r\n", vendor, family, pawn != INVALID_HANDLE_VALUE);
     if (pawn == INVALID_HANDLE_VALUE) return;
 
-    // IntelMSR.bin sits next to the exe
-    GetModuleFileNameW(NULL, path, MAX_PATH);
-    lstrcpyW(wcsrchr(path, L'\\') + 1, L"IntelMSR.bin");
-    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
-    BOOL ok = FALSE;
-    if (f != INVALID_HANDLE_VALUE) {
-        DWORD size = GetFileSize(f, NULL), got;
-        UCHAR *blob = HeapAlloc(GetProcessHeap(), 0, size);
-        if (blob && ReadFile(f, blob, size, &got, NULL) && got == size)
-            ok = DeviceIoControl(pawn, PIO_LOAD, blob, size, NULL, 0, &got, NULL);
-        HeapFree(GetProcessHeap(), 0, blob);
-        CloseHandle(f);
-    }
     ULONG64 v;
-    if (ok && readMsr(0x1A2, &v)) tjMax = (v >> 16) & 0xFF; // MSR_TEMPERATURE_TARGET
-    if (!tjMax) { CloseHandle(pawn); pawn = INVALID_HANDLE_VALUE; }
+    if (!lstrcmpA(vendor, "GenuineIntel") && loadModule(L"IntelMSR.bin") && pawnCall("ioctl_read_msr", 0x1A2, &v)) {
+        tjMax = (v >> 16) & 0xFF; // MSR_TEMPERATURE_TARGET
+        if (!tjMax) tjMax = 100;
+        cpuKind = CPU_INTEL;
+    } else if (!lstrcmpA(vendor, "AuthenticAMD") && family >= 0x17 && family <= 0x1A && loadModule(L"AMDFamily17.bin")) {
+        pciMutex = CreateMutexW(NULL, FALSE, L"Global\\Access_PCI");
+        cpuKind = CPU_AMD;
+    }
+    logf(L"cpu: tempsource=%d\r\n", cpuKind);
+    if (cpuKind == CPU_NONE) { CloseHandle(pawn); pawn = INVALID_HANDLE_VALUE; }
 }
 
 static int cpuTemp(void)
 {
     ULONG64 v;
-    if (pawn == INVALID_HANDLE_VALUE || !readMsr(0x1B1, &v)) return -1; // IA32_PACKAGE_THERM_STATUS
-    return tjMax - (int)((v >> 16) & 0x7F);
+    if (cpuKind == CPU_INTEL) {
+        if (pawnCall("ioctl_read_msr", 0x1B1, &v) || pawnCall("ioctl_read_msr", 0x19C, &v)) // package, else core
+            return tjMax - (int)((v >> 16) & 0x7F);
+    } else if (cpuKind == CPU_AMD) {
+        DWORD w = pciMutex ? WaitForSingleObject(pciMutex, 50) : WAIT_OBJECT_0;
+        if (w != WAIT_OBJECT_0 && w != WAIT_ABANDONED) return -1;
+        BOOL ok = pawnCall("ioctl_read_smn", 0x00059800, &v); // THM_TCON_CUR_TMP
+        if (pciMutex) ReleaseMutex(pciMutex);
+        if (ok) {
+            int t = (int)(((v >> 21) & 0x7FF) * 125 / 1000);
+            if (v & 0x80000) t -= 49; // CUR_TEMP_RANGE_SEL: -49..206 C range
+            if (t > 0 && t < 150) return t;
+        }
+    }
+    return -1;
 }
 
 // ---------- CPU usage ----------
@@ -306,7 +468,7 @@ static HWND targetWindow(void)
 }
 
 // ---------- overlay: NVIDIA-style one-line HUD, per-pixel alpha ----------
-// "FPS 13 | GPU 95% 64°C | CPU 51% 58°C": white text, bold values, small units, thin dividers, soft dark outline.
+// "FPS 13 | GPU 95% 64Â°C | CPU 51% 58Â°C": white text, bold values, small units, thin dividers, soft dark outline.
 typedef struct { HFONT f; int gap; wchar_t s[12]; } Run; // f == NULL: divider
 static Run runs[16];
 static int nRuns, em;
@@ -435,6 +597,11 @@ static void sample(void)
     if (hidden) { ShowWindow(overlay, SW_HIDE); return; }
     RECT anchor = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
     HWND tw = targetWindow();
+    if (!tw) { // entire screen: the monitor the app in front is on (multi-monitor setups)
+        MONITORINFO mi = { sizeof mi };
+        if (GetMonitorInfoW(MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY), &mi))
+            anchor = mi.rcMonitor;
+    }
     nRuns = 0;
     ZeroMemory(runs, sizeof runs); // so render() can compare runs byte for byte
     if (target[0] && (!tw || IsIconic(tw))) { // picked app closed or minimized: nothing to sit on
@@ -462,10 +629,8 @@ static void sample(void)
     // GPU/CPU refresh once a second (every 3rd tick); FPS refreshes every tick.
     static int gpuU = -1, gpuT = -1, cpuU = -1, cpuT = -1;
     if (slowTick++ % 3 == 0) {
-        nvmlUtil u;
-        unsigned t;
-        if (on[S_GPU]) gpuU = gpu && nvmlGetUtil(gpu, &u) == 0 ? (int)u.gpu : -1;
-        if (on[S_GPUT]) gpuT = gpu && nvmlGetTemp(gpu, 0, &t) == 0 ? (int)t : -1;
+        if (on[S_GPU]) gpuU = gpuUsage();
+        if (on[S_GPUT]) gpuT = gpuTemp();
         if (on[S_CPU]) cpuU = cpuUsage();
         if (on[S_CPUT]) cpuT = cpuTemp();
     }
@@ -688,7 +853,8 @@ static void trayIcon(DWORD msg)
     n.uCallbackMessage = WM_TRAY;
     n.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
     wsprintfW(n.szTip, L"Mini OSD - FPS: %s  GPU: %s  CPU temp: %s",
-              etwOk ? L"ok" : L"off", gpu ? L"ok" : L"off", pawn != INVALID_HANDLE_VALUE ? L"ok" : L"off");
+              etwOk ? L"ok" : L"off", gpu ? L"NVML" : gpuGeneric ? L"WDDM" : L"off",
+              cpuKind == CPU_INTEL ? L"Intel" : cpuKind == CPU_AMD ? L"AMD" : L"off (PawnIO)");
     Shell_NotifyIconW(msg, &n);
 }
 
@@ -785,7 +951,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
     }
 
     etwStart();
-    nvmlStart();
+    gpuStart();
     pawnStart();
     cpuUsage(); // prime the delta
 

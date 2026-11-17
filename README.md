@@ -9,12 +9,13 @@ Mini OSD provides a sleek, NVIDIA-style one-line HUD showing FPS, GPU usage, GPU
 ## ✨ Features
 
 - **Zero-Injection Frame Tracking**: Uses Event Tracing for Windows (ETW) to capture present calls across DXGI, Direct3D 9, and DxgKrnl (supporting DirectX 9/10/11/12, OpenGL, and Vulkan). Safe for games with strict anti-cheat software (no DLL injection, no hooking).
-- **GPU Stats via NVML**: Direct integration with `nvml.dll` (ships with NVIDIA drivers) for accurate GPU utilization and temperature readouts.
+- **GPU Stats on any vendor**: NVIDIA GPUs use `nvml.dll` (ships with the driver). AMD, Intel and other GPUs use the same sources as Task Manager: the "GPU Engine" performance counters for usage and D3DKMT adapter perf data for temperature (Windows 10 1809+ / Windows 11, WDDM 2.5+ drivers).
 - **CPU Stats**:
   - CPU usage calculated via `GetSystemTimes`.
-  - CPU temperature readout via `PawnIO` driver and `IntelMSR.bin` (using the same MSR IOCTL methods as LibreHardwareMonitor).
+  - CPU temperature via the [PawnIO](https://pawnio.eu) driver (same modules as LibreHardwareMonitor): `IntelMSR.bin` on Intel, `AMDFamily17.bin` on AMD Ryzen / Threadripper / EPYC (Zen 1-5, families 17h-1Ah). The installer can install PawnIO for you. Without it, CPU temp shows `--` and everything else still works.
 - **Discord-Style Window Picker**: Click "Capture..." from the tray menu to open an interactive picker featuring live DWM thumbnails for open windows or select "Entire screen" to follow whatever app is in the foreground.
 - **Clean NVIDIA-Style Overlay**: Rendered with per-pixel alpha and soft dark outline using the Windows native **Bahnschrift** font (DIN typography).
+- **Multi-monitor aware**: In "Entire screen" mode the overlay follows the monitor of the app in front.
 - **Customizable Overlay Position**: Toggle between **Top right** (default) and **Top left** overlay placement on the fly via the tray menu, with position preferences automatically saved.
 - **EcoQoS Efficiency**: Configured for Windows efficiency scheduling (EcoQoS) to ensure it never interferes with game performance.
 - **System Tray Controls**: Right-click or left-click the tray icon to toggle individual metrics on or off, pick a target window, change position, hide the overlay, or exit.
@@ -47,6 +48,7 @@ Start `osd.exe` with the `/log` command-line switch to generate an `osd.log` fil
 ```cmd
 osd.exe /log
 ```
+The tray icon tooltip also shows which sensor sources are active (e.g. `GPU: NVML`/`WDDM`, `CPU temp: Intel`/`AMD`/`off (PawnIO)`).
 
 ---
 
@@ -80,7 +82,7 @@ installer\build.bat
 
 - `MiniOSD-Setup.exe` - Windows setup installer.
 - `osd.exe` - Standalone precompiled executable.
-- `IntelMSR.bin` - Module used for MSR CPU temperature queries.
+- `IntelMSR.bin`, `AMDFamily17.bin` - PawnIO modules for Intel / AMD CPU temperature.
 - `osd.c` - Core application source code (ETW tracing, NVML, PawnIO, DWM picker, HUD rendering).
 - `osd.manifest` - Windows application manifest requiring administrative execution level and DPI awareness.
 - `osd.rc` - Resource definition embedding the manifest.

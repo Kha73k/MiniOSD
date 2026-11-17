@@ -1,6 +1,6 @@
 ; Mini OSD - Inno Setup Script
 #define AppName "Mini OSD"
-#define AppVersion "1.1.0"
+#define AppVersion "1.2.0"
 #define Publisher "Kha73k"
 #define AppURL "https://github.com/Kha73k/MiniOSD"
 #define AppExeName "osd.exe"
@@ -41,10 +41,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "startupicon"; Description: "Start Mini OSD automatically on Windows logon"; GroupDescription: "Startup options:"; Flags: unchecked
+Name: "pawnio"; Description: "Install the PawnIO driver (needed for CPU temperature on Intel and AMD)"; GroupDescription: "Sensors:"; Check: not PawnIOInstalled
 
 [Files]
 Source: "..\osd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\IntelMSR.bin"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\AMDFamily17.bin"; DestDir: "{app}"; Flags: ignoreversion
+Source: "PawnIO_setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Tasks: pawnio
 Source: "..\osd.ini"; DestDir: "{app}"; Flags: onlyifdoesntexist uninsneveruninstall
 
 [Icons]
@@ -54,9 +57,16 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: deskto
 Name: "{commonstartup}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: startupicon
 
 [Run]
+Filename: "{tmp}\PawnIO_setup.exe"; Parameters: "-install"; StatusMsg: "Installing the PawnIO driver..."; Flags: waituntilterminated; Tasks: pawnio
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: postinstall nowait skipifsilent
 
 [Code]
+function PawnIOInstalled(): Boolean;
+begin
+  Result := RegKeyExists(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO') or
+            RegKeyExists(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Services\PawnIO');
+end;
+
 function IsUpgrade(): Boolean;
 begin
   Result := RegKeyExists(HKEY_LOCAL_MACHINE, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#SetupSetting("AppId")}_is1');
