@@ -1,4 +1,4 @@
-﻿// Mini OSD: FPS / GPU / CPU overlay. One timer tick per second, no injection.
+// Mini OSD: FPS / GPU / CPU overlay. One timer tick per second, no injection.
 #define _WIN32_WINNT 0x0A00
 #define WIN32_LEAN_AND_MEAN
 #define INITGUID
@@ -369,51 +369,80 @@ static BOOL loadModule(const wchar_t *name)
     return ok;
 }
 
+static int tdieOffset; // AMD: some early Zen parts report Tctl with a fixed offset over the real die temperature
+static ULONGLONG nextPawnTry;
+static void trayIcon(DWORD msg);
+
 static void pawnStart(void)
 {
     int r[4];
-    char vendor[13] = { 0 };
+    char vendor[13] = { 0 }, brand[49] = { 0 };
+    if (cpuKind != CPU_NONE) return;
     __cpuid(r, 0);
     memcpy(vendor, &r[1], 4); memcpy(vendor + 4, &r[3], 4); memcpy(vendor + 8, &r[2], 4);
     __cpuid(r, 1);
     int family = ((r[0] >> 8) & 0xF) + (((r[0] >> 8) & 0xF) == 0xF ? (r[0] >> 20) & 0xFF : 0);
+    for (int i = 0; i < 3; i++) { __cpuid(r, 0x80000002 + i); memcpy(brand + 16 * i, r, 16); }
 
     pawn = CreateFileW(L"\\\\?\\GLOBALROOT\\Device\\PawnIO", FILE_READ_DATA | FILE_WRITE_DATA,
                        FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
-    logf(L"cpu: vendor=%S family=%x pawnio=%d\r\n", vendor, family, pawn != INVALID_HANDLE_VALUE);
+    logf(L"cpu: vendor=%S family=%x pawnio=%d err=%lu\r\n", vendor, family, pawn != INVALID_HANDLE_VALUE, GetLastError());
     if (pawn == INVALID_HANDLE_VALUE) return;
 
     ULONG64 v;
-    if (!lstrcmpA(vendor, "GenuineIntel") && loadModule(L"IntelMSR.bin") && pawnCall("ioctl_read_msr", 0x1A2, &v)) {
-        tjMax = (v >> 16) & 0xFF; // MSR_TEMPERATURE_TARGET
+    if (!lstrcmpA(vendor, "GenuineIntel") && loadModule(L"IntelMSR.bin")) {
+        // MSR_TEMPERATURE_TARGET; some CPUs/VMs don't expose it, 100 C is the right TjMax for nearly all of them.
+        tjMax = pawnCall("ioctl_read_msr", 0x1A2, &v) ? (int)((v >> 16) & 0xFF) : 0;
         if (!tjMax) tjMax = 100;
         cpuKind = CPU_INTEL;
     } else if (!lstrcmpA(vendor, "AuthenticAMD") && family >= 0x17 && family <= 0x1A && loadModule(L"AMDFamily17.bin")) {
+        // Offsets from the Linux k10temp driver (same table LibreHardwareMonitor uses): Tdie = Tctl + offset.
+        if (strstr(brand, "1600X") || strstr(brand, "1700X") || strstr(brand, "1800X")) tdieOffset = -20;
+        else if (strstr(brand, "Threadripper 19") || strstr(brand, "Threadripper 29")) tdieOffset = -27;
+        else if (strstr(brand, "2700X")) tdieOffset = -10;
         pciMutex = CreateMutexW(NULL, FALSE, L"Global\\Access_PCI");
         cpuKind = CPU_AMD;
     }
-    logf(L"cpu: tempsource=%d\r\n", cpuKind);
+    logf(L"cpu: tempsource=%d brand=%S\r\n", cpuKind, brand);
     if (cpuKind == CPU_NONE) { CloseHandle(pawn); pawn = INVALID_HANDLE_VALUE; }
 }
 
-static int cpuTemp(void)
+static int cpuTempRaw(void)
 {
     ULONG64 v;
     if (cpuKind == CPU_INTEL) {
         if (pawnCall("ioctl_read_msr", 0x1B1, &v) || pawnCall("ioctl_read_msr", 0x19C, &v)) // package, else core
             return tjMax - (int)((v >> 16) & 0x7F);
     } else if (cpuKind == CPU_AMD) {
-        DWORD w = pciMutex ? WaitForSingleObject(pciMutex, 50) : WAIT_OBJECT_0;
+        DWORD w = pciMutex ? WaitForSingleObject(pciMutex, 100) : WAIT_OBJECT_0;
         if (w != WAIT_OBJECT_0 && w != WAIT_ABANDONED) return -1;
-        BOOL ok = pawnCall("ioctl_read_smn", 0x00059800, &v); // THM_TCON_CUR_TMP
+        BOOL ok = pawnCall("ioctl_read_smn", 0x00059800, &v); // THM_TCON_CUR_TMP, CUR_TEMP in bits 31:21 (1/8 C)
         if (pciMutex) ReleaseMutex(pciMutex);
         if (ok) {
-            int t = (int)(((v >> 21) & 0x7FF) * 125 / 1000);
-            if (v & 0x80000) t -= 49; // CUR_TEMP_RANGE_SEL: -49..206 C range
+            // Reading range is 0..255 C or -49..206 C: RANGE_SEL (bit 19), and on newer Zen also TJ_SEL (bits 17:16 both set).
+            BOOL shifted = (v & 0x80000) || (v & 0x30000) == 0x30000;
+            int milli = (int)((v >> 21) & 0x7FF) * 125 - (shifted ? 49000 : 0) + tdieOffset * 1000;
+            int t = (milli + 500) / 1000;
             if (t > 0 && t < 150) return t;
         }
     }
     return -1;
+}
+
+// Last good reading is kept for a few seconds so one missed sample (busy PCI bus, scheduling hiccup) never flashes "--".
+static int cpuTemp(void)
+{
+    static int last = -1;
+    static ULONGLONG lastAt;
+    ULONGLONG now = GetTickCount64();
+    if (cpuKind == CPU_NONE && now >= nextPawnTry) { // driver not ready at launch (logon, fresh install): keep trying
+        nextPawnTry = now + 10000;
+        pawnStart();
+        if (cpuKind != CPU_NONE) trayIcon(NIM_MODIFY);
+    }
+    int t = cpuTempRaw();
+    if (t >= 0) { last = t; lastAt = now; return t; }
+    return last >= 0 && now - lastAt < 5000 ? last : -1;
 }
 
 // ---------- CPU usage ----------

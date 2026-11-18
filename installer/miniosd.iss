@@ -1,6 +1,6 @@
 ; Mini OSD - Inno Setup Script
 #define AppName "Mini OSD"
-#define AppVersion "1.2.0"
+#define AppVersion "1.2.1"
 #define Publisher "Kha73k"
 #define AppURL "https://github.com/Kha73k/MiniOSD"
 #define AppExeName "osd.exe"
@@ -41,7 +41,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "startupicon"; Description: "Start Mini OSD automatically on Windows logon"; GroupDescription: "Startup options:"; Flags: unchecked
-Name: "pawnio"; Description: "Install the PawnIO driver (needed for CPU temperature on Intel and AMD)"; GroupDescription: "Sensors:"; Check: not PawnIOInstalled
+Name: "pawnio"; Description: "Install / update the PawnIO driver (needed for CPU temperature on Intel and AMD)"; GroupDescription: "Sensors:"; Check: PawnIONeeded
 
 [Files]
 Source: "..\osd.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -61,10 +61,19 @@ Filename: "{tmp}\PawnIO_setup.exe"; Parameters: "-install"; StatusMsg: "Installi
 Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: postinstall nowait skipifsilent
 
 [Code]
-function PawnIOInstalled(): Boolean;
+// True when PawnIO is missing or older than 2.1 (the bundled CPU modules need the 2.x driver).
+function PawnIONeeded(): Boolean;
+var
+  V: String;
+  Packed, Need: Int64;
 begin
-  Result := RegKeyExists(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO') or
-            RegKeyExists(HKEY_LOCAL_MACHINE, 'SYSTEM\CurrentControlSet\Services\PawnIO');
+  Result := True;
+  if RegQueryStringValue(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO', 'DisplayVersion', V) and
+     StrToVersion(V, Packed) then
+  begin
+    Need := PackVersionComponents(2, 1, 0, 0);
+    Result := ComparePackedVersion(Packed, Need) < 0;
+  end;
 end;
 
 function IsUpgrade(): Boolean;
